@@ -2,13 +2,13 @@
 /// put on a classpath, so it is launched as a process. Run from the project root:
 /// `zunit` or `java -ea test/ZaudioconvertTest.java`
 static final Path SCRIPT = Path.of("zaudioconvert");
-static final Path EBL = Path.of("test/resources/AKAI - BASS LegendsSL001.ebl");
+static final Path EBL = Path.of("test/resources/sine441.ebl");
 
-// taken from a hex dump of the resource, independent of the script's parser
+// synthetic 441 Hz sine (100 frames per period) built with these values, independent of the script's parser
 static final int PCM_OFFSET = 0x124;
-static final int FRAMES = 305_993;
-static final int LOOP_START = 0;
-static final int LOOP_END = 302_249;
+static final int FRAMES = 1_000;
+static final int LOOP_START = 100;
+static final int LOOP_END = 899;
 static final int SAMPLE_RATE = 44_100;
 
 void main() throws Exception {
@@ -21,7 +21,7 @@ void convertsEbl() throws Exception {
     var exitCode = run(EBL.toString(), "-out", out.toString());
     assert exitCode == 0 : "expected exit code 0 but got " + exitCode;
 
-    var wav = ByteBuffer.wrap(Files.readAllBytes(out.resolve("AKAI - BASS LegendsSL001.wav"))).order(ByteOrder.LITTLE_ENDIAN);
+    var wav = ByteBuffer.wrap(Files.readAllBytes(out.resolve("sine441.wav"))).order(ByteOrder.LITTLE_ENDIAN);
     assertId(wav, 0, "RIFF");
     assert wav.getInt(4) == wav.capacity() - 8 : "RIFF size %d does not match file size %d".formatted(wav.getInt(4), wav.capacity());
     assertId(wav, 8, "WAVE");

@@ -4,7 +4,11 @@ Converts E-mu Emulator X / Proteus X `.ebl` samples to 16-bit PCM `.wav` files. 
 
 ## Prerequisites
 
-Java 25+
+A Java 25+ JDK with `java` on the `PATH` — the script has no build step and runs via the `#!/usr/bin/env -S java --source 25` shebang. A JRE-only runtime is not sufficient: source-file mode compiles in memory and requires the `jdk.compiler` module.
+
+```
+java -version
+```
 
 ## Install
 
