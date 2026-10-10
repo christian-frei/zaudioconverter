@@ -1,0 +1,19 @@
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+.history/
+*.vsix
+
+# VS Code Java extension (Eclipse JDT language server)
+.classpath
+.project
+.settings/
+.factorypath
+bin/
+
+# Claude Code local settings
+.claude/settings.local.json

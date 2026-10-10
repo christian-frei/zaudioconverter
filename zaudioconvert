@@ -1,0 +1,216 @@
+#!/usr/bin/env -S java --source 25
+
+interface Boundary {
+
+    String NAME = MethodHandles.lookup().lookupClass().getEnclosingClass().getName();
+    String VERSION = "2026-10-10.1";
+    String OUT_FLAG = "-out";
+
+    record Invocation(List<Path> inputs, Optional<Path> outDir) {
+
+        static Invocation parse(List<String> args) {
+            var outIndex = args.indexOf(OUT_FLAG);
+            if (outIndex == -1)
+                return new Invocation(paths(args), Optional.empty());
+            if (outIndex == args.size() - 1)
+                throw new IllegalArgumentException(OUT_FLAG + " requires a directory");
+            var inputs = new ArrayList<>(args);
+            var outDir = Path.of(inputs.remove(outIndex + 1));
+            inputs.remove(outIndex);
+            return new Invocation(paths(inputs), Optional.of(outDir));
+        }
+
+        static List<Path> paths(List<String> args) {
+            return args.stream().map(Path::of).toList();
+        }
+    }
+
+    static void convert(List<String> args) {
+        IO.println(NAME + " " + VERSION);
+        if (args.isEmpty() || args.getFirst().equals("-help")) {
+            IO.println("""
+                    Usage: %s <file.ebl|directory>... [-out <directory>]
+                      Converts E-mu Emulator X / Proteus X .ebl samples to .wav.
+                      Directories are searched recursively for .ebl files.
+                      -out      Write all .wav files into <directory> (default: next to each input)
+                      -help     Show this help
+                      -version  Show version
+                    """.formatted(NAME));
+            return;
+        }
+        if (args.getFirst().equals("-version"))
+            return;
+        var invocation = Invocation.parse(args);
+        var files = invocation.inputs().stream()
+                .flatMap(Control::eblFiles)
+                .toList();
+        var failures = files.stream()
+                .filter(file -> !Control.convert(file, invocation.outDir()))
+                .count();
+        IO.println("converted %d of %d files".formatted(files.size() - failures, files.size()));
+        if (failures > 0)
+            System.exit(1);
+    }
+}
+
+interface Control {
+
+    String EBL = ".ebl";
+    String WAV = ".wav";
+
+    static boolean convert(Path ebl, Optional<Path> outDir) {
+        try {
+            var sample = Entity.Sample.fromEbl(Files.readAllBytes(ebl));
+            var wav = outDir.orElse(ebl.toAbsolutePath().getParent()).resolve(wavName(ebl));
+            Files.createDirectories(wav.getParent());
+            Files.write(wav, sample.wav());
+            IO.println("%s -> %s (%s)".formatted(ebl, wav, sample));
+            return true;
+        } catch (IOException | IllegalArgumentException | BufferUnderflowException | IndexOutOfBoundsException e) {
+            System.err.println("%s: %s: %s".formatted(Boundary.NAME, ebl, e.getMessage()));
+            return false;
+        }
+    }
+
+    static Stream<Path> eblFiles(Path input) {
+        if (!Files.isDirectory(input))
+            return Stream.of(input);
+        try (var paths = Files.walk(input)) {
+            return paths
+                    .filter(Files::isRegularFile)
+                    .filter(Control::isEbl)
+                    .sorted()
+                    .toList()
+                    .stream();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    static boolean isEbl(Path path) {
+        return path.getFileName().toString().toLowerCase().endsWith(EBL);
+    }
+
+    static String wavName(Path ebl) {
+        var name = ebl.getFileName().toString();
+        return name.substring(0, name.length() - EBL.length()) + WAV;
+    }
+}
+
+interface Entity {
+
+    record Loop(int startFrame, int endFrame) {}
+
+    /// 16-bit PCM, little-endian, channels interleaved
+    record Sample(String name, int sampleRate, int channels, byte[] pcm, Optional<Loop> loop) {
+
+        static final int BYTES_PER_SAMPLE = 2;
+        static final int NAME_BYTES = 64;
+        static final int SMPL_SIZE = 60;
+        static final int UNITY_NOTE = 60;
+        static final long NANOS_PER_SECOND = 1_000_000_000L;
+
+        /// IFF container `FORM`/`E5B0` with an `E5S1` sample chunk. Sample addresses
+        /// are byte offsets relative to the chunk data + 2 and point at the first byte
+        /// of a sample, so end addresses are inclusive.
+        static Sample fromEbl(byte[] bytes) {
+            var buffer = ByteBuffer.wrap(bytes);
+            requireId(buffer, 0, "FORM");
+            requireId(buffer, 8, "E5B0");
+            var data = e5s1Offset(buffer);
+            var name = new String(bytes, data + 6, NAME_BYTES, StandardCharsets.UTF_16LE).replace("\0", "").strip();
+            var base = data + 2;
+            buffer.order(ByteOrder.LITTLE_ENDIAN).position(data + 74);
+            int startLeft = buffer.getInt(), startRight = buffer.getInt();
+            int endLeft = buffer.getInt(), endRight = buffer.getInt();
+            int loopStart = buffer.getInt();
+            buffer.getInt();
+            int loopEnd = buffer.getInt();
+            buffer.getInt();
+            var sampleRate = buffer.getInt(data + 106);
+            var looped = bytes[data + 112] == 1;
+            var mono = startLeft == startRight && endLeft == endRight;
+            var frames = frames(startLeft, endLeft);
+            var pcm = mono
+                    ? Arrays.copyOfRange(bytes, base + startLeft, base + startLeft + frames * BYTES_PER_SAMPLE)
+                    : interleave(bytes, base + startLeft, base + startRight, frames);
+            var loop = looped
+                    ? Optional.of(new Loop(frames(startLeft, loopStart) - 1, frames(startLeft, loopEnd) - 1))
+                    : Optional.<Loop>empty();
+            return new Sample(name, sampleRate, mono ? 1 : 2, pcm, loop);
+        }
+
+        static void requireId(ByteBuffer buffer, int offset, String id) {
+            if (!id(buffer, offset).equals(id))
+                throw new IllegalArgumentException("not an E-mu EBL file, expected " + id);
+        }
+
+        static String id(ByteBuffer buffer, int offset) {
+            return new String(buffer.array(), offset, 4, StandardCharsets.US_ASCII);
+        }
+
+        static int e5s1Offset(ByteBuffer buffer) {
+            var offset = 12;
+            while (offset + 8 <= buffer.limit()) {
+                if (id(buffer, offset).equals("E5S1"))
+                    return offset + 8;
+                var size = buffer.getInt(offset + 4);
+                offset += 8 + size + (size & 1);
+            }
+            throw new IllegalArgumentException("no E5S1 sample chunk found");
+        }
+
+        static int frames(int start, int inclusiveEnd) {
+            return (inclusiveEnd - start) / BYTES_PER_SAMPLE + 1;
+        }
+
+        static byte[] interleave(byte[] bytes, int left, int right, int frames) {
+            var pcm = new byte[frames * 2 * BYTES_PER_SAMPLE];
+            for (var frame = 0; frame < frames; frame++) {
+                System.arraycopy(bytes, left + frame * BYTES_PER_SAMPLE, pcm, frame * 2 * BYTES_PER_SAMPLE, BYTES_PER_SAMPLE);
+                System.arraycopy(bytes, right + frame * BYTES_PER_SAMPLE, pcm, (frame * 2 + 1) * BYTES_PER_SAMPLE, BYTES_PER_SAMPLE);
+            }
+            return pcm;
+        }
+
+        byte[] wav() {
+            var smplSize = loop.isPresent() ? 8 + SMPL_SIZE : 0;
+            var buffer = ByteBuffer.allocate(44 + pcm.length + smplSize).order(ByteOrder.LITTLE_ENDIAN);
+            var blockAlign = channels * BYTES_PER_SAMPLE;
+            buffer.put("RIFF".getBytes()).putInt(buffer.capacity() - 8).put("WAVE".getBytes())
+                    .put("fmt ".getBytes()).putInt(16)
+                    .putShort((short) 1).putShort((short) channels)
+                    .putInt(sampleRate).putInt(sampleRate * blockAlign)
+                    .putShort((short) blockAlign).putShort((short) (BYTES_PER_SAMPLE * 8))
+                    .put("data".getBytes()).putInt(pcm.length).put(pcm);
+            loop.ifPresent(l -> putSmpl(buffer, l));
+            return buffer.array();
+        }
+
+        void putSmpl(ByteBuffer buffer, Loop loop) {
+            buffer.put("smpl".getBytes()).putInt(SMPL_SIZE)
+                    .putInt(0).putInt(0)
+                    .putInt((int) (NANOS_PER_SECOND / sampleRate))
+                    .putInt(UNITY_NOTE).putInt(0)
+                    .putInt(0).putInt(0)
+                    .putInt(1).putInt(0)
+                    .putInt(0).putInt(0)
+                    .putInt(loop.startFrame()).putInt(loop.endFrame())
+                    .putInt(0).putInt(0);
+        }
+
+        int frames() {
+            return pcm.length / (channels * BYTES_PER_SAMPLE);
+        }
+
+        @Override
+        public String toString() {
+            var looping = loop.map(l -> ", loop %d-%d".formatted(l.startFrame(), l.endFrame())).orElse("");
+            return "\"%s\", %d Hz, %d ch, %d frames%s".formatted(name, sampleRate, channels, frames(), looping);
+        }
+    }
+}
+
+void main(String... args) throws Exception {
+    Boundary.convert(List.of(args));
+}
